@@ -52,7 +52,7 @@ export default function LegalDocumentAnalyzer() {
       const formData = new FormData();
       formData.append("document", selectedFile);
 
-      const response = await fetch("/api/upload-document/route.ts", {
+      const response = await fetch("/api/upload-document", {
         method: "POST",
         body: formData,
       });
@@ -86,7 +86,7 @@ export default function LegalDocumentAnalyzer() {
     setIsAnalyzing(analysisType);
 
     try {
-      const response = await fetch("/api/analyze-document-free", {
+      const response = await fetch("/api/analyze-document", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

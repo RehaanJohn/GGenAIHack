@@ -1,4 +1,4 @@
-// src/api/upload-document/route.ts
+// src/app/api/upload-document/route.ts
 
 import { NextRequest, NextResponse } from "next/server";
 import { Pinecone } from "@pinecone-database/pinecone";
@@ -34,49 +34,77 @@ function splitTextIntoChunks(text: string, chunkSize: number = 1000, overlap: nu
   return chunks.filter(chunk => chunk.length > 0);
 }
 
+// Function to clean and validate text content
+function cleanText(text: string): string {
+  // Remove non-printable characters and control characters
+  const cleaned = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, ' ')
+    .replace(/[^\x20-\x7E\s]/g, ' ') // Keep only ASCII printable characters and whitespace
+    .replace(/\s+/g, ' ') // Replace multiple spaces with single space
+    .trim();
+  
+  return cleaned;
+}
+
+// Function to validate if text is readable (not corrupted)
+function isValidText(text: string): boolean {
+  // Check for minimum readable content
+  if (text.length < 10) return false;
+  
+  // Check ratio of printable characters to total length
+  const printableCount = (text.match(/[a-zA-Z0-9\s.,!?;:()\-"']/g) || []).length;
+  const ratio = printableCount / text.length;
+  
+  // Should be at least 70% readable characters
+  return ratio > 0.7;
+}
+
 // Extract text from different file types
 async function extractTextFromFile(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
   
   if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
-    // For PDF files, we'll use a simple text extraction
-    // In production, you should use pdf-parse or similar library
-    try {
-      // Simple PDF text extraction (very basic)
-      const uint8Array = new Uint8Array(buffer);
-      const text = new TextDecoder('utf-8', { fatal: false }).decode(uint8Array);
-      
-      // Very basic PDF text extraction - look for text patterns
-      // This is not ideal but works as a fallback
-      const textMatches = text.match(/\(([^)]+)\)/g);
-      if (textMatches && textMatches.length > 0) {
-        return textMatches.map(match => match.slice(1, -1)).join(' ');
-      }
-      
-      // If no text found in PDF, return an error message
-      return "Could not extract text from PDF. For better PDF support, please convert to TXT format or use a specialized PDF processing service.";
-    } catch (error) {
-      console.error("Error extracting PDF:", error);
-      throw new Error("Failed to extract text from PDF file. Please try converting to TXT format.");
-    }
+    // For now, reject PDFs and ask user to convert to text
+    // The built-in PDF extraction is too unreliable
+    throw new Error("PDF files are currently not supported due to text extraction limitations. Please convert your PDF to a text (.txt) file and upload that instead. You can use online PDF to text converters or copy-paste the content into a text file.");
   }
   
   // For text files
   if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
-    const text = new TextDecoder().decode(buffer);
-    return text;
+    try {
+      // Try UTF-8 first
+      let text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+      text = cleanText(text);
+      
+      if (isValidText(text)) {
+        return text;
+      }
+      
+      // If UTF-8 fails, try other encodings
+      text = new TextDecoder('iso-8859-1').decode(buffer);
+      text = cleanText(text);
+      
+      if (isValidText(text)) {
+        return text;
+      }
+      
+      throw new Error("Could not decode text file properly");
+    } catch (error) {
+      throw new Error("Failed to read text file. Please ensure it's a valid UTF-8 encoded text file.");
+    }
   }
   
-  // For DOCX files (basic support)
+  // For DOCX files
   if (file.name.endsWith('.docx')) {
-    // Basic DOCX support would require mammoth.js
-    // For now, return an error message
-    throw new Error("DOCX files are not yet supported. Please convert to TXT or PDF format.");
+    throw new Error("DOCX files are not yet supported. Please save your document as a plain text (.txt) file and upload that instead.");
   }
   
-  // For other file types, treat as text (basic fallback)
-  const text = new TextDecoder().decode(buffer);
-  return text;
+  // For DOC files
+  if (file.name.endsWith('.doc')) {
+    throw new Error("DOC files are not yet supported. Please save your document as a plain text (.txt) file and upload that instead.");
+  }
+  
+  // For other file types, reject them
+  throw new Error("Unsupported file type. Please use plain text (.txt) files only for now.");
 }
 
 // Generate embeddings using Google's embedding model
@@ -87,12 +115,21 @@ async function generateEmbeddings(texts: string[]): Promise<number[][]> {
   
   // Process each text individually to avoid rate limits
   for (const text of texts) {
+    // Validate text before sending to API
+    if (!isValidText(text)) {
+      console.warn(`Skipping invalid text chunk: ${text.substring(0, 100)}...`);
+      // Create dummy embedding for invalid chunks
+      embeddings.push(new Array(768).fill(0).map(() => Math.random() * 0.01));
+      continue;
+    }
+    
     try {
+      // Use the correct API call format
       const result = await model.embedContent(text);
+      
       if (result.embedding && result.embedding.values) {
         embeddings.push(result.embedding.values);
       } else {
-        // Fallback: create a dummy embedding if generation fails
         console.warn(`Failed to generate embedding for text chunk, using dummy embedding`);
         embeddings.push(new Array(768).fill(0).map(() => Math.random() * 0.01));
       }
@@ -101,6 +138,7 @@ async function generateEmbeddings(texts: string[]): Promise<number[][]> {
       await new Promise(resolve => setTimeout(resolve, 100));
     } catch (error) {
       console.error("Error generating embedding:", error);
+      console.error("Problematic text:", text.substring(0, 200));
       // Create dummy embedding as fallback
       embeddings.push(new Array(768).fill(0).map(() => Math.random() * 0.01));
     }
@@ -121,21 +159,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate file size (10MB limit)
-    if (file.size > 10 * 1024 * 1024) {
+    // Validate file size (5MB limit for now)
+    if (file.size > 5 * 1024 * 1024) {
       return NextResponse.json(
-        { success: false, error: "File size too large. Maximum size is 10MB." },
+        { success: false, error: "File size too large. Maximum size is 5MB." },
         { status: 400 }
       );
     }
 
-    // Validate file type
-    const allowedTypes = ['.pdf', '.doc', '.docx', '.txt'];
+    // Only allow text files for now
+    const allowedTypes = ['.txt'];
     const fileExtension = '.' + file.name.split('.').pop()?.toLowerCase();
     
     if (!allowedTypes.includes(fileExtension)) {
       return NextResponse.json(
-        { success: false, error: "Invalid file type. Supported types: PDF, DOC, DOCX, TXT" },
+        { 
+          success: false, 
+          error: "Currently only plain text (.txt) files are supported. Please convert your document to a text file and try again." 
+        },
         { status: 400 }
       );
     }
@@ -157,6 +198,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Validate that the extracted text is readable
+    if (!isValidText(extractedText)) {
+      return NextResponse.json(
+        { success: false, error: "The uploaded file contains corrupted or unreadable text. Please ensure it's a valid text file." },
+        { status: 400 }
+      );
+    }
+
+    console.log(`Extracted ${extractedText.length} characters of valid text from ${file.name}`);
+
     // Split text into chunks
     const chunks = splitTextIntoChunks(extractedText);
     
@@ -168,13 +219,25 @@ export async function POST(request: NextRequest) {
     }
 
     // Limit chunks to avoid overwhelming the system
-    const limitedChunks = chunks.slice(0, 50); // Max 50 chunks
+    const limitedChunks = chunks.slice(0, 30); // Reduced from 50 to 30 for faster processing
+
+    // Validate all chunks before processing
+    const validChunks = limitedChunks.filter(chunk => isValidText(chunk));
+    
+    if (validChunks.length === 0) {
+      return NextResponse.json(
+        { success: false, error: "No valid text chunks could be created from the document" },
+        { status: 400 }
+      );
+    }
+
+    console.log(`Processing ${validChunks.length} valid chunks out of ${limitedChunks.length} total chunks`);
 
     // Generate embeddings using Google's embedding model
-    console.log(`Generating embeddings for ${limitedChunks.length} chunks...`);
-    const embeddings = await generateEmbeddings(limitedChunks);
+    console.log(`Generating embeddings for ${validChunks.length} chunks...`);
+    const embeddings = await generateEmbeddings(validChunks);
     
-    if (embeddings.length !== limitedChunks.length) {
+    if (embeddings.length !== validChunks.length) {
       return NextResponse.json(
         { success: false, error: "Failed to generate embeddings for all chunks" },
         { status: 500 }
@@ -185,18 +248,33 @@ export async function POST(request: NextRequest) {
     const pinecone = new Pinecone({
       apiKey: process.env.PINECONE_API_KEY as string,
     });
+
+    // Check if index exists
+    try {
+      await pinecone.describeIndex(process.env.PINECONE_INDEX_NAME as string);
+    } catch (error) {
+      return NextResponse.json(
+        { 
+          success: false, 
+          error: "Pinecone index not found. Please create an index named 'LegalDoc' with 768 dimensions in your Pinecone console.",
+          details: "Go to https://app.pinecone.io/ and create an index with dimensions: 768, metric: cosine"
+        },
+        { status: 404 }
+      );
+    }
+
     const index = pinecone.Index(process.env.PINECONE_INDEX_NAME as string);
 
     // Create vectors for Pinecone
-    const vectors = limitedChunks.map((chunk, chunkIndex) => ({
-      id: `${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}_chunk_${chunkIndex}`,
+    const vectors = validChunks.map((chunk, chunkIndex) => ({
+      id: `${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}_chunk_${chunkIndex}_${Date.now()}`,
       values: embeddings[chunkIndex],
       metadata: {
         filename: file.name,
         fileSize: file.size,
         uploadDate: new Date().toISOString(),
         chunkIndex: chunkIndex,
-        totalChunks: limitedChunks.length,
+        totalChunks: validChunks.length,
         content: chunk,
         fileType: fileExtension,
       },
@@ -210,7 +288,7 @@ export async function POST(request: NextRequest) {
       success: true,
       message: "Document uploaded and processed successfully",
       documentId: file.name,
-      chunksCreated: limitedChunks.length,
+      chunksCreated: validChunks.length,
       vectorsUploaded: vectors.length,
       extractedTextLength: extractedText.length,
     });

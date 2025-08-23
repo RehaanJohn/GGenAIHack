@@ -1,4 +1,4 @@
-// src/api/analyze-document/route.ts
+// src/app/api/analyze-document/route.ts
 
 import { NextRequest, NextResponse } from "next/server";
 import { Pinecone } from "@pinecone-database/pinecone";
@@ -127,21 +127,80 @@ export async function POST(request: NextRequest) {
     const systemPrompt = analysisPrompts[analysisType as keyof typeof analysisPrompts] 
       || analysisPrompts.summarize;
 
-    // Use Gemini for analysis
-    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-    
-    const prompt = `${systemPrompt}\n\nDocument Content:\n${relevantContent}`;
-    
-    const result = await model.generateContent(prompt);
-    const analysis = result.response.text();
+    // Use Gemini 1.5 Flash for analysis (current model)
+    try {
+      // Try Gemini 1.5 Flash first (most common and available)
+      const model = genAI.getGenerativeModel({ 
+        model: "gemini-1.5-flash",
+        generationConfig: {
+          maxOutputTokens: 4000,
+          temperature: 0.1,
+        }
+      });
+      
+      const prompt = `${systemPrompt}\n\nDocument Content:\n${relevantContent}`;
+      
+      const result = await model.generateContent(prompt);
+      const analysis = result.response.text();
 
-    return NextResponse.json({
-      success: true,
-      analysis: analysis,
-      analysisType: analysisType,
-      fileName: fileName,
-      chunksAnalyzed: queryResponse.matches.length,
-    });
+      return NextResponse.json({
+        success: true,
+        analysis: analysis,
+        analysisType: analysisType,
+        fileName: fileName,
+        chunksAnalyzed: queryResponse.matches.length,
+      });
+
+    } catch (modelError) {
+      console.error("Gemini 1.5 Flash error, trying fallback:", modelError);
+      
+      try {
+        // Fallback to Gemini 1.5 Pro
+        const fallbackModel = genAI.getGenerativeModel({ 
+          model: "gemini-1.5-pro",
+          generationConfig: {
+            maxOutputTokens: 4000,
+            temperature: 0.1,
+          }
+        });
+        
+        const prompt = `${systemPrompt}\n\nDocument Content:\n${relevantContent}`;
+        const result = await fallbackModel.generateContent(prompt);
+        const analysis = result.response.text();
+
+        return NextResponse.json({
+          success: true,
+          analysis: analysis,
+          analysisType: analysisType,
+          fileName: fileName,
+          chunksAnalyzed: queryResponse.matches.length,
+          note: "Used fallback model due to primary model unavailability"
+        });
+
+      } catch (fallbackError) {
+        console.error("All Gemini models failed:", fallbackError);
+        
+        // Return a basic analysis if AI models fail
+        return NextResponse.json({
+          success: true,
+          analysis: `Document Analysis for ${fileName}
+          
+Analysis Type: ${formatAnalysisType(analysisType)}
+
+Content Summary:
+The document contains ${queryResponse.matches.length} sections of content. 
+
+Key Content Preview:
+${relevantContent.substring(0, 500)}...
+
+Note: AI analysis is currently unavailable. This is a basic content extraction. Please try again later for full AI-powered analysis.`,
+          analysisType: analysisType,
+          fileName: fileName,
+          chunksAnalyzed: queryResponse.matches.length,
+          warning: "AI analysis unavailable - showing basic content extraction"
+        });
+      }
+    }
 
   } catch (error) {
     console.error("Analysis error:", error);
@@ -153,5 +212,23 @@ export async function POST(request: NextRequest) {
       },
       { status: 500 }
     );
+  }
+}
+
+// Helper function to format analysis type names
+function formatAnalysisType(type: string): string {
+  switch (type) {
+    case "summarize":
+      return "Document Summary";
+    case "detailed":
+      return "Detailed Analysis";
+    case "risks":
+      return "Risk Assessment";
+    case "key-terms":
+      return "Key Terms & Clauses";
+    case "plain-english":
+      return "Plain English Translation";
+    default:
+      return type.charAt(0).toUpperCase() + type.slice(1);
   }
 }
