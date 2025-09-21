@@ -13,6 +13,9 @@ import {
   Eye,
 } from "lucide-react";
 
+import TtsPlayer from 
+"../components/TtsPlayer";
+
 interface AnalysisResult {
   type: string;
   content: string;
@@ -398,9 +401,8 @@ export default function LegalDocumentAnalyzer() {
 
                       <div className="prose max-w-none">
                         <div className="bg-gray-50 p-4 rounded-lg">
-                          <pre className="whitespace-pre-wrap text-sm text-gray-700 font-sans">
-                            {result.content}
-                          </pre>
+                          <TtsPlayer 
+                          simplifiedText={result.content} />
                         </div>
                       </div>
                     </div>
